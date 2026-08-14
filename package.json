@@ -1,0 +1,16 @@
+{
+  "name": "lab-images-sboms-scanning",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Synthetic health service for the images, SBOMs, and scanning lab",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "picocolors": "1.1.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

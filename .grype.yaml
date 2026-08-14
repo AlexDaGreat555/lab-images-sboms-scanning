@@ -1,0 +1,6 @@
+db:
+  cache-dir: /opt/grype-db
+  auto-update: false
+  validate-age: false
+
+check-for-app-update: false

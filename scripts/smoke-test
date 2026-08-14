@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if (($# != 1)); then
+  printf 'usage: %s IMAGE\n' "$0" >&2
+  exit 2
+fi
+
+image=$1
+container_id=""
+temporary_directory=$(mktemp -d)
+
+cleanup() {
+  if [[ -n "$container_id" ]]; then
+    docker rm --force "$container_id" >/dev/null 2>&1 || true
+  fi
+  rm --recursive --force -- "$temporary_directory"
+}
+trap cleanup EXIT
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  printf 'FAIL: image %s does not exist; build it before running the smoke test.\n' "$image" >&2
+  exit 1
+fi
+
+container_id=$(docker run \
+  --detach \
+  --platform linux/amd64 \
+  --publish 0.0.0.0::8080 \
+  "$image")
+
+host_port=$(docker port "$container_id" 8080/tcp | awk -F: 'NR == 1 { print $NF }')
+if [[ ! "$host_port" =~ ^[0-9]+$ ]]; then
+  printf 'FAIL: Docker did not publish the service port.\n' >&2
+  docker logs "$container_id" >&2 || true
+  exit 1
+fi
+
+body_path="$temporary_directory/body.txt"
+expected_path="$temporary_directory/expected.txt"
+printf 'lab03 healthy\n' > "$expected_path"
+
+request_host="127.0.0.1"
+if ! curl --noproxy '*' --silent --max-time 0.2 "http://${request_host}:${host_port}/health" \
+  >/dev/null 2>&1 && getent hosts host.docker.internal >/dev/null 2>&1; then
+  # A nested devcontainer can share the Docker Desktop daemon without sharing
+  # its loopback namespace. Docker exposes the daemon host under this name.
+  request_host="host.docker.internal"
+fi
+
+for _ in {1..30}; do
+  status=$(curl \
+    --noproxy '*' \
+    --silent \
+    --output "$body_path" \
+    --write-out '%{http_code}' \
+    "http://${request_host}:${host_port}/health" || true)
+
+  if [[ "$status" == "200" ]] && cmp --silent "$expected_path" "$body_path"; then
+    printf 'Smoke test passed for %s.\n' "$image"
+    exit 0
+  fi
+  sleep 0.2
+done
+
+printf 'FAIL: %s did not return HTTP 200 with the expected /health body.\n' "$image" >&2
+docker logs "$container_id" >&2 || true
+exit 1

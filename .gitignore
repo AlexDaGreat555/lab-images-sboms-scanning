@@ -1,0 +1,7 @@
+node_modules/
+*.sbom.json
+*.syft.json
+*.grype.json
+*.scan.json
+npm-debug.log*
+.DS_Store

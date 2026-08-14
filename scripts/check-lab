@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root" || exit 1
+
+readonly approved_debian="node:22-bookworm-slim@sha256:a17d50af28002a160548bd4225b3cfcb12c5efcb171f79e68758f2885fb1b066"
+readonly approved_alpine="node:22-alpine@sha256:76789712cd1ae89a1225eac9077010d68987a423588042dac30446f502f1858c"
+
+failures=0
+temporary_directory=$(mktemp -d)
+trap 'rm --recursive --force -- "$temporary_directory"' EXIT
+
+record_failure() {
+  printf 'FAIL: %s\n' "$1" >&2
+  failures=$((failures + 1))
+}
+
+for command in docker syft grype jq node curl sha256sum; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    record_failure "$command is not available; reopen this repository in its devcontainer"
+  fi
+done
+
+if ((failures > 0)); then
+  printf '\nLab check stopped because required tools are unavailable.\n' >&2
+  exit 1
+fi
+
+if ! sha256sum --check --quiet .lab-fixtures.sha256; then
+  record_failure "an instructor-owned application or scanning fixture was changed"
+fi
+
+if ! syft version 2>&1 | grep --quiet --extended-regexp '(^|[^0-9])v?1\.50\.0([^0-9]|$)'; then
+  record_failure "Syft 1.50.0 is required; rebuild the devcontainer"
+fi
+
+if ! grype version 2>&1 | grep --quiet --extended-regexp '(^|[^0-9])v?0\.116\.1([^0-9]|$)'; then
+  record_failure "Grype 0.116.1 is required; rebuild the devcontainer"
+fi
+
+database_status=$(grype db status 2>&1 || true)
+if ! grep --quiet 'Schema:[[:space:]]*v6\.1\.9' <<< "$database_status" ||
+   ! grep --quiet 'Built:[[:space:]]*2026-08-13T06:39:30Z' <<< "$database_status" ||
+   ! grep --quiet 'Status:[[:space:]]*valid' <<< "$database_status"; then
+  record_failure "the frozen 2026-08-13 Grype database is not installed; rebuild the devcontainer"
+fi
+
+final_base=""
+mapfile -t from_references < <(
+  awk 'toupper($1) == "FROM" { print $2 }' Dockerfile 2>/dev/null
+)
+
+final_definition_valid=true
+if ((${#from_references[@]} != 1)); then
+  record_failure "Dockerfile must contain exactly one FROM instruction"
+  final_definition_valid=false
+else
+  final_base=${from_references[0]}
+  if [[ "$final_base" != "$approved_debian" && "$final_base" != "$approved_alpine" ]]; then
+    record_failure "Dockerfile does not use one of the two approved digest-pinned bases"
+    final_definition_valid=false
+  fi
+fi
+
+if ! cmp --silent <(tail --lines=+2 Dockerfile.vulnerable) <(tail --lines=+2 Dockerfile); then
+  record_failure "only the FROM reference may differ between Dockerfile.vulnerable and Dockerfile"
+  final_definition_valid=false
+fi
+
+if [[ ! -f lab03/observations.json ]]; then
+  record_failure "lab03/observations.json is missing"
+fi
+
+while IFS= read -r json_path; do
+  case "$json_path" in
+    package.json|package-lock.json|.devcontainer/devcontainer.json|lab03/observations.json)
+      continue
+      ;;
+  esac
+
+  if jq --exit-status '
+    (type == "object") and
+    ((has("artifacts") and (.artifacts | type == "array")) or
+     (has("matches") and (.matches | type == "array")))
+  ' "$json_path" >/dev/null 2>&1; then
+    record_failure "generated scan report is committed at $json_path"
+  fi
+done < <(git ls-files '*.json')
+
+vulnerable_sbom="$temporary_directory/vulnerable-sbom.json"
+vulnerable_scan="$temporary_directory/vulnerable-scan.json"
+final_sbom="$temporary_directory/final-sbom.json"
+final_scan="$temporary_directory/final-scan.json"
+vulnerable_ready=false
+final_ready=false
+
+printf '\nBuilding the instructor-owned vulnerable image...\n'
+if ! docker build \
+  --platform linux/amd64 \
+  --file Dockerfile.vulnerable \
+  --tag lab03:vulnerable \
+  .; then
+  record_failure "Dockerfile.vulnerable did not build"
+elif ! ./scripts/smoke-test lab03:vulnerable; then
+  record_failure "the vulnerable image did not pass its smoke test"
+elif ! syft lab03:vulnerable --output syft-json > "$vulnerable_sbom"; then
+  record_failure "Syft could not inventory the vulnerable image"
+else
+  grype lab03:vulnerable \
+    --by-cve \
+    --only-fixed \
+    --fail-on critical \
+    --output json > "$vulnerable_scan"
+  vulnerable_status=$?
+
+  if ((vulnerable_status != 2)); then
+    record_failure "the vulnerable image did not fail the fixable-Critical policy with exit status 2"
+  elif ! jq --exit-status '
+    [.matches[] | select(
+      .vulnerability.id == "CVE-2026-42010" and
+      .vulnerability.severity == "Critical" and
+      .artifact.name == "libgnutls30" and
+      .artifact.type == "deb" and
+      ((.vulnerability.fix.versions // []) | length > 0)
+    )] | length > 0
+  ' "$vulnerable_scan" >/dev/null; then
+    record_failure "the frozen scan did not contain the expected fixable Critical Debian finding"
+  else
+    vulnerable_ready=true
+  fi
+fi
+
+if [[ "$final_definition_valid" == true ]]; then
+  printf '\nBuilding the student final image...\n'
+  if ! docker build \
+    --platform linux/amd64 \
+    --file Dockerfile \
+    --tag lab03:final \
+    .; then
+    record_failure "Dockerfile did not build the final image"
+  elif ! ./scripts/smoke-test lab03:final; then
+    record_failure "the final image did not pass the same smoke test"
+  elif ! syft lab03:final --output syft-json > "$final_sbom"; then
+    record_failure "Syft could not inventory the final image"
+  elif ! jq --exit-status '
+    any(.artifacts[]; .name == "picocolors" and .type == "npm")
+  ' "$final_sbom" >/dev/null; then
+    record_failure "the final image no longer contains the supplied application dependency"
+  else
+    grype lab03:final \
+      --by-cve \
+      --only-fixed \
+      --fail-on critical \
+      --output json > "$final_scan"
+    final_status=$?
+
+    if ((final_status != 0)); then
+      record_failure "the final image still has a fixable Critical finding"
+    else
+      final_ready=true
+    fi
+  fi
+fi
+
+if [[ "$vulnerable_ready" == true && "$final_ready" == true && -f lab03/observations.json ]]; then
+  if ! node - \
+    lab03/observations.json \
+    "$vulnerable_sbom" \
+    "$vulnerable_scan" \
+    "$final_sbom" \
+    "$final_scan" \
+    "$final_base" <<'NODE'
+"use strict";
+
+const fs = require("node:fs");
+
+const [
+  observationsPath,
+  vulnerableSbomPath,
+  vulnerableScanPath,
+  finalSbomPath,
+  finalScanPath,
+  finalBase,
+] = process.argv.slice(2);
+
+function readJson(path) {
+  try {
+    return JSON.parse(fs.readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`${path} is not valid JSON: ${error.message}`);
+  }
+}
+
+function requireExactKeys(value, expected, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    throw new Error(`${label} must contain exactly: ${wanted.join(", ")}`);
+  }
+}
+
+function requirePackageShape(value, label, expectedType) {
+  requireExactKeys(value, ["name", "version", "type"], label);
+  for (const field of ["name", "version", "type"]) {
+    if (typeof value[field] !== "string" || value[field].length === 0) {
+      throw new Error(`${label}.${field} must be a non-empty string`);
+    }
+  }
+  if (value.type !== expectedType) {
+    throw new Error(`${label}.type must be ${expectedType}`);
+  }
+}
+
+function samePackage(artifact, observation) {
+  return artifact.name === observation.name &&
+    artifact.version === observation.version &&
+    artifact.type === observation.type;
+}
+
+try {
+  const observations = readJson(observationsPath);
+  const vulnerableSbom = readJson(vulnerableSbomPath);
+  const vulnerableScan = readJson(vulnerableScanPath);
+  const finalSbom = readJson(finalSbomPath);
+  const finalScan = readJson(finalScanPath);
+
+  requireExactKeys(
+    observations,
+    ["vulnerable_image", "finding", "final_image"],
+    "observations",
+  );
+  requireExactKeys(
+    observations.vulnerable_image,
+    ["total_packages", "os_package", "application_package"],
+    "vulnerable_image",
+  );
+  requirePackageShape(observations.vulnerable_image.os_package, "os_package", "deb");
+  requirePackageShape(
+    observations.vulnerable_image.application_package,
+    "application_package",
+    "npm",
+  );
+  requireExactKeys(
+    observations.finding,
+    [
+      "id",
+      "severity",
+      "package",
+      "installed_version",
+      "fixed_version",
+      "type",
+      "source",
+    ],
+    "finding",
+  );
+  requireExactKeys(
+    observations.final_image,
+    ["base_image", "total_packages", "fixable_critical_findings"],
+    "final_image",
+  );
+
+  if (observations.vulnerable_image.total_packages !== vulnerableSbom.artifacts.length) {
+    throw new Error("vulnerable_image.total_packages does not match the generated SBOM");
+  }
+  if (!vulnerableSbom.artifacts.some((artifact) =>
+    samePackage(artifact, observations.vulnerable_image.os_package))) {
+    throw new Error("os_package does not identify a deb package in the vulnerable SBOM");
+  }
+  if (!vulnerableSbom.artifacts.some((artifact) =>
+    samePackage(artifact, observations.vulnerable_image.application_package))) {
+    throw new Error("application_package does not identify an npm package in the vulnerable SBOM");
+  }
+
+  const finding = observations.finding;
+  if (finding.severity !== "Critical" || finding.type !== "deb" || finding.source !== "base-image") {
+    throw new Error("finding must record a Critical deb finding with source base-image");
+  }
+  if (finding.id !== "CVE-2026-42010" || finding.package !== "libgnutls30") {
+    throw new Error("finding must record the instructor-selected CVE-2026-42010 result");
+  }
+  const matchingFinding = vulnerableScan.matches.some((match) =>
+    match.vulnerability.id === finding.id &&
+    match.vulnerability.severity === finding.severity &&
+    match.artifact.name === finding.package &&
+    match.artifact.version === finding.installed_version &&
+    match.artifact.type === finding.type &&
+    (match.vulnerability.fix?.versions || []).includes(finding.fixed_version));
+  if (!matchingFinding) {
+    throw new Error("finding does not match a fixable Critical result in the frozen scan");
+  }
+
+  if (observations.final_image.base_image !== finalBase) {
+    throw new Error("final_image.base_image does not match Dockerfile");
+  }
+  if (observations.final_image.total_packages !== finalSbom.artifacts.length) {
+    throw new Error("final_image.total_packages does not match the generated SBOM");
+  }
+  const finalCriticalCount = finalScan.matches.filter(
+    (match) => match.vulnerability.severity === "Critical",
+  ).length;
+  if (observations.final_image.fixable_critical_findings !== finalCriticalCount ||
+      finalCriticalCount !== 0) {
+    throw new Error("final_image.fixable_critical_findings must match the zero-result policy scan");
+  }
+} catch (error) {
+  process.stderr.write(`Observation check: ${error.message}\n`);
+  process.exit(1);
+}
+NODE
+  then
+    record_failure "lab03/observations.json does not agree with independently generated results"
+  fi
+fi
+
+if ((failures > 0)); then
+  printf '\nLab check failed with %d problem(s).\n' "$failures" >&2
+  exit 1
+fi
+
+printf '\nAll Lab 3 checks passed.\n'
