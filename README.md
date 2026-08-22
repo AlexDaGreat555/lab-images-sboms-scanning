@@ -21,11 +21,11 @@ Both bases run the unmodified service and satisfy the lab's policy under the
 frozen vulnerability database. They intentionally have different operating
 system package inventories.
 
-## Selected finding
+## Finding to investigate
 
-The vulnerable image contains more than one Critical result. Record the
-fixable Debian-package finding for **CVE-2026-42010** in
-`lab03/observations.json`; the other results are outside this lab's scope.
+The vulnerable image contains more than one Critical result. Investigate the
+fixable Debian-package finding for **CVE-2026-42010**; the other results are
+outside this lab's scope.
 
 ## Commands
 
@@ -49,4 +49,4 @@ archive is stored with Git LFS; if a clone contains a small pointer file under
 `fixtures/`, run `git lfs pull` before rebuilding the devcontainer.
 
 Do not commit generated SBOMs or vulnerability reports. The only student-owned
-files submitted for this lab are `Dockerfile` and `lab03/observations.json`.
+file submitted for this lab is `Dockerfile`.

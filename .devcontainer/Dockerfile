@@ -21,11 +21,11 @@ ENV GRYPE_DB_CACHE_DIR=/opt/grype-db \
 RUN case "$TARGETARCH" in \
       amd64) \
         ZSTD_SHA256="640eba8dfc558df0da4e828860e9e81af961caad482387d1783931a3b1c53122"; \
-        GIT_LFS_SHA256="4995aac84ea4b030c524d2ba28abe65346bb74ae610f231913f478f4ff6140f7" \
+        GIT_LFS_SHA256="633a69f57a01eb3dd8e4bf8e191296793c5305e90e3d4584115fba2815081383" \
         ;; \
       arm64) \
         ZSTD_SHA256="97a58383b0ad55cc8183e59cbb112f2eb55c3dc1e90de816fa5cfb983d5c2ff0"; \
-        GIT_LFS_SHA256="b8346d00b23c838febb391574a75ab90e2b4a49853a42ec66a5025e70558fc60" \
+        GIT_LFS_SHA256="b6d69c986d219a5000a0f3c33a20c619a7f83d4752c163c35a588152eb71b01e" \
         ;; \
       *) printf 'Unsupported architecture: %s\n' "$TARGETARCH" >&2; exit 1 ;; \
     esac \
