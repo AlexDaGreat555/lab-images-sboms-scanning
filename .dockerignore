@@ -3,4 +3,3 @@
 !package-lock.json
 !src/
 !src/**
-!fixtures/grype-db.tar.zst

@@ -1,52 +1,50 @@
 # Images, SBOMs, and Scanning Lab
 
-This repository contains the starter service and deterministic tooling for Lab 3.
-Open it in the provided devcontainer and follow the tasks on the course website.
+Use Syft and Grype to investigate this service's container image, revise its Dockerfile to address vulnerabilities, and compare the results.
+Follow the [Lab instructions](https://cmu-devops.github.io/labs/lab03/).
 
-The image definitions target `linux/amd64`. The supplied smoke test and checker
-must therefore be run with an amd64-capable Docker daemon (the devcontainer setup
-supports Docker Desktop on both Intel and Apple silicon hosts).
+## Get started
 
-## Approved replacement bases
+Start Docker on your computer, clone this repository, and open it in VS Code using **Dev Containers: Reopen in Container**.
+Run commands from the repository root inside the devcontainer.
+Check the tools and download the vulnerability database:
 
-For the final image, replace only the `FROM` line in `Dockerfile` with one of
-these platform-specific, digest-pinned references:
-
-```text
-node:22-bookworm-slim@sha256:a17d50af28002a160548bd4225b3cfcb12c5efcb171f79e68758f2885fb1b066
-node:22-alpine@sha256:76789712cd1ae89a1225eac9077010d68987a423588042dac30446f502f1858c
+```bash
+docker info
+syft version
+grype version
+grype db update
+grype db status
 ```
 
-Both bases run the unmodified service and satisfy the lab's policy under the
-frozen vulnerability database. They intentionally have different operating
-system package inventories.
+Docker should report a running server, the tools should print their versions, and the database status should be valid.
+The database download needs an internet connection and may take a few minutes.
+If Docker cannot connect, check that it is running on your computer and reopen the devcontainer.
+If the download fails, check your connection and rerun `grype db update`.
 
-## Finding to investigate
+Build the original image and check that it runs:
 
-The vulnerable image contains more than one Critical result. Investigate the
-fixable Debian-package finding for **CVE-2026-42010**; the other results are
-outside this lab's scope.
-
-## Commands
-
-Establish the expected failing baseline:
-
-```console
-./scripts/check-lab
+```bash
+docker build --platform linux/amd64 --tag lab03:before .
+./scripts/smoke-test lab03:before
 ```
 
-Build and smoke-test an image directly:
+Use `linux/amd64` because the supplied base-image digest identifies that platform.
+Docker Desktop supports emulation on Apple silicon.
+The smoke test checks the status and response body of `/health` and removes its container afterward.
 
-```console
-docker build --platform linux/amd64 --file Dockerfile.vulnerable --tag lab03:vulnerable .
-./scripts/smoke-test lab03:vulnerable
-```
+## Work on the lab
 
-Syft and Grype are pinned in the devcontainer. Grype reads the frozen,
-checksum-verified database fixture installed there and `.grype.yaml` prevents
-database updates, so everyone observes the same scan results. The database
-archive is stored with Git LFS; if a clone contains a small pointer file under
-`fixtures/`, run `git lfs pull` before rebuilding the devcontainer.
+* Generate an SBOM with Syft, then scan that SBOM with Grype.
+* Save your original reports in `.lab-results/`, which Git ignores.
+* Edit `Dockerfile` to address the findings and keep the supplied application working.
+* Rebuild as `lab03:after`, run the smoke test, and generate and scan a fresh SBOM.
+* Explain what changed and any remaining findings in your lab notes.
+* Trace one package affected by a finding you addressed from its source in the original image to its final version or absence, using both SBOMs, and explain what happened to the associated scan finding.
 
-Do not commit generated SBOMs or vulnerability reports. The only student-owned
-file submitted for this lab is `Dockerfile`.
+Export your notes as a PDF and submit them through Canvas, answering the three questions in Task 4 of the lab instructions.
+Include the relevant Dockerfile diff or changed lines in your notes.
+Keep generated SBOMs and scan reports locally for comparison.
+
+Grype uses current advisory data, so findings can change over time.
+There is no prescribed replacement image or requirement for an empty scan.

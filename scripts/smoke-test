@@ -53,6 +53,8 @@ for _ in {1..30}; do
   status=$(curl \
     --noproxy '*' \
     --silent \
+    --connect-timeout 1 \
+    --max-time 2 \
     --output "$body_path" \
     --write-out '%{http_code}' \
     "http://${request_host}:${host_port}/health" || true)

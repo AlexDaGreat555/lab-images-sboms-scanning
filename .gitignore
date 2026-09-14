@@ -5,3 +5,4 @@ node_modules/
 *.scan.json
 npm-debug.log*
 .DS_Store
+.lab-results/
